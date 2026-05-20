@@ -700,7 +700,7 @@ def extract_jsonl_metadata(jsonl_path: Path) -> dict:
 
     Reads the file once, collecting: real user message count,
     first user prompt text, working directory (cwd), git branch,
-    and custom title (from /rename command).
+    custom title (from /rename command), and recap (from /compact or summary).
     """
     result = {
         "messages": 0,
@@ -708,6 +708,7 @@ def extract_jsonl_metadata(jsonl_path: Path) -> dict:
         "cwd": "",
         "git_branch": "",
         "custom_title": "",
+        "recap": "",
     }
 
     try:
@@ -723,10 +724,36 @@ def extract_jsonl_metadata(jsonl_path: Path) -> dict:
                     result["custom_title"] = obj.get("customTitle", "")
                     continue
 
+                # Capture summary-type messages (auto context compression)
+                if obj.get("type") == "summary":
+                    result["recap"] = obj.get("summary", "")
+                    continue
+
+                # Capture away_summary messages (background recap)
+                if obj.get("type") == "system" and obj.get("subtype") == "away_summary":
+                    result["recap"] = obj.get("content", "")
+                    continue
+
                 if obj.get("type") != "user":
                     continue
 
+                # Capture compact summary messages (/compact command)
                 if obj.get("isCompactSummary"):
+                    msg = obj.get("message", {})
+                    content = msg.get("content", "")
+                    text = ""
+                    if isinstance(content, str):
+                        text = content
+                    elif isinstance(content, list):
+                        for item in content:
+                            if isinstance(item, dict) and item.get("type") == "text":
+                                text = item.get("text", "")
+                                break
+                    if text:
+                        # Strip boilerplate intro, keep the actual summary content
+                        marker = "Summary:"
+                        idx = text.find(marker)
+                        result["recap"] = text[idx + len(marker):].strip() if idx != -1 else text.strip()
                     continue
 
                 msg = obj.get("message", {})
@@ -802,9 +829,11 @@ def collect_chats_data(config: dict) -> list[dict]:
 
             # Enrich from JSONL (sessions-index may be stale)
             jsonl_file = find_jsonl_for_html(source_path, html_path.name)
+            recap = ""
             if jsonl_file:
                 jsonl_meta = extract_jsonl_metadata(jsonl_file)
                 messages = jsonl_meta["messages"] if jsonl_meta["messages"] > 0 else meta.get("messageCount", 0)
+                recap = jsonl_meta["recap"]
 
                 # If sessions-index.json lacks customTitle, try JSONL
                 if not meta.get("customTitle") and jsonl_meta.get("custom_title"):
@@ -851,11 +880,13 @@ def collect_chats_data(config: dict) -> list[dict]:
             # Enrich from JSONL if available
             jsonl_file = find_jsonl_for_html(source_path, html_path.name)
 
+            recap = ""
             if jsonl_file:
                 jsonl_meta = extract_jsonl_metadata(jsonl_file)
                 messages = jsonl_meta["messages"]
                 branch = jsonl_meta["git_branch"]
                 first_prompt = jsonl_meta["first_prompt"]
+                recap = jsonl_meta["recap"]
 
                 # Use custom title from JSONL if available (set by /rename)
                 if jsonl_meta["custom_title"]:
@@ -906,6 +937,7 @@ def collect_chats_data(config: dict) -> list[dict]:
                 "branch": branch,
                 "first_prompt": first_prompt,
                 "summary": summary,
+                "recap": recap,
                 "html_link": html_link,
                 "html_size": html_size,
             }
@@ -964,6 +996,7 @@ def generate_index(config: dict) -> int:
 <td class="hidden-col branch-col">{escape(chat['branch'])}</td>
 <td class="hidden-col size-col">{chat['html_size'] // 1024}KB</td>
 <td class="hidden-col prompt-col" title="{escape(chat['first_prompt'])}">{escape(chat['first_prompt'][:40])}{"..." if len(chat['first_prompt']) > 40 else ""}</td>
+<td class="recap-col" title="{escape(chat['recap'])}">{escape(chat['recap'][:80])}{"..." if len(chat['recap']) > 80 else ""}</td>
 </tr>
 '''
 
@@ -1350,6 +1383,7 @@ def generate_index(config: dict) -> int:
             <label><input type="checkbox" data-col="branch-col"> Branch</label>
             <label><input type="checkbox" data-col="size-col"> Size</label>
             <label><input type="checkbox" data-col="prompt-col"> First prompt</label>
+            <label><input type="checkbox" data-col="recap-col" checked> Recap</label>
         </div>
     </div>
 
@@ -1368,6 +1402,7 @@ def generate_index(config: dict) -> int:
                     <th class="hidden-col branch-col" data-sort="branch">Branch</th>
                     <th class="hidden-col size-col" data-sort="none">Size</th>
                     <th class="hidden-col prompt-col" data-sort="none">First prompt</th>
+                    <th class="recap-col" data-sort="none">Recap</th>
                 </tr>
             </thead>
             <tbody>
